@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.venv/
+venv/
+
+# Build artifacts and executables
+build/
+dist/
+*.exe
+*.spec.bak
+
+# Local outputs and test scratch data
+scratch_test_run*/
+*.tif
+*.tiff
+*.log
+
+# IDE and operating system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local camera settings may contain machine-specific values
+config.json
+dh/config.json

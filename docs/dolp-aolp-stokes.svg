@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1050" viewBox="0 0 1600 1050">
+  <defs>
+    <marker id="arrow2" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#293033"/>
+    </marker>
+    <style>
+      text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #202426; }
+      .title { font-size: 38px; font-weight: 700; }
+      .subtitle { font-size: 20px; fill: #565d61; }
+      .section { font-size: 25px; font-weight: 700; }
+      .body { font-size: 18px; }
+      .small { font-size: 15px; fill: #565d61; }
+      .formula { font-family: "Cambria Math", "Times New Roman", serif; font-size: 24px; }
+      .label { font-size: 18px; font-weight: 700; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1050" fill="#f7f8f6"/>
+  <rect width="1600" height="116" fill="#ffffff"/>
+  <rect y="112" width="1600" height="4" fill="#2a7774"/>
+  <text x="70" y="60" class="title">从四个强度到 DoLP 与 AoLP</text>
+  <text x="72" y="94" class="subtitle">先用 Stokes 参数描述线偏振，再把“差异有多强”和“主方向在哪里”分开表达</text>
+
+  <!-- Inputs -->
+  <text x="70" y="162" class="section">四个观测量</text>
+  <g transform="translate(70 187)">
+    <rect width="248" height="110" rx="6" fill="#e5eadb" stroke="#607c3c" stroke-width="2"/>
+    <line x1="32" y1="48" x2="92" y2="48" stroke="#293033" stroke-width="6"/>
+    <text x="142" y="53" class="label">I0</text><text x="142" y="80" class="small">0° 分析器强度</text>
+    <g transform="translate(270 0)"><rect width="248" height="110" rx="6" fill="#fff0d4" stroke="#ad7213" stroke-width="2"/><line x1="34" y1="78" x2="90" y2="22" stroke="#293033" stroke-width="6"/><text x="142" y="53" class="label">I45</text><text x="142" y="80" class="small">45° 分析器强度</text></g>
+    <g transform="translate(540 0)"><rect width="248" height="110" rx="6" fill="#d8f0ef" stroke="#2a7774" stroke-width="2"/><line x1="62" y1="19" x2="62" y2="80" stroke="#293033" stroke-width="6"/><text x="142" y="53" class="label">I90</text><text x="142" y="80" class="small">90° 分析器强度</text></g>
+    <g transform="translate(810 0)"><rect width="248" height="110" rx="6" fill="#f6ddda" stroke="#a8473a" stroke-width="2"/><line x1="34" y1="22" x2="90" y2="78" stroke="#293033" stroke-width="6"/><text x="142" y="53" class="label">I135</text><text x="142" y="80" class="small">135° 分析器强度</text></g>
+  </g>
+  <line x1="1165" y1="242" x2="1245" y2="242" stroke="#293033" stroke-width="3" marker-end="url(#arrow2)"/>
+  <rect x="1255" y="187" width="275" height="110" rx="6" fill="#ffffff" stroke="#cdd2d4" stroke-width="2"/>
+  <text x="1392" y="229" text-anchor="middle" class="label">逐像素计算</text>
+  <text x="1392" y="262" text-anchor="middle" class="small">四图需先对齐、标定并转浮点</text>
+
+  <!-- Stokes -->
+  <rect x="70" y="342" width="700" height="275" rx="6" fill="#ffffff" stroke="#cdd2d4" stroke-width="2"/>
+  <text x="100" y="388" class="section">线偏振 Stokes 参数</text>
+  <text x="105" y="438" class="formula">S0 = I0 + I90 ≈ I45 + I135</text>
+  <text x="105" y="482" class="formula">S1 = I0 − I90</text>
+  <text x="105" y="526" class="formula">S2 = I45 − I135</text>
+  <text x="105" y="571" class="body">S0：总强度　S1：水平与垂直的差　S2：45° 与 135° 的差</text>
+  <text x="105" y="597" class="small">降噪常用 S0 = (I0 + I45 + I90 + I135) / 2；理想情况下两种写法一致。</text>
+
+  <!-- Phasor -->
+  <rect x="810" y="342" width="720" height="275" rx="6" fill="#ffffff" stroke="#cdd2d4" stroke-width="2"/>
+  <text x="840" y="388" class="section">在 S1–S2 平面看最直观</text>
+  <g transform="translate(995 490)">
+    <line x1="-125" y1="0" x2="150" y2="0" stroke="#9aa1a4" stroke-width="2" marker-end="url(#arrow2)"/>
+    <line x1="0" y1="105" x2="0" y2="-115" stroke="#9aa1a4" stroke-width="2" marker-end="url(#arrow2)"/>
+    <text x="150" y="28" class="label">S1</text><text x="15" y="-105" class="label">S2</text>
+    <circle r="100" fill="none" stroke="#d8dcde" stroke-width="2" stroke-dasharray="7 7"/>
+    <line x1="0" y1="0" x2="76" y2="-64" stroke="#e85d4a" stroke-width="6" marker-end="url(#arrow2)"/>
+    <path d="M50 0 A50 50 0 0 0 38 -32" fill="none" stroke="#e3a82b" stroke-width="4"/>
+    <text x="65" y="-20" class="label" fill="#ad7213">2ψ</text>
+  </g>
+  <text x="1230" y="455" class="body">向量长度：线偏振分量强度</text>
+  <text x="1230" y="494" class="formula">L = √(S1² + S2²)</text>
+  <text x="1230" y="542" class="body">向量角是 2ψ，所以 AoLP 要除以 2</text>
+  <text x="1230" y="579" class="small">这也解释了偏振方向每 180° 重复一次。</text>
+
+  <!-- Metrics -->
+  <rect x="70" y="656" width="700" height="224" rx="6" fill="#eef6f4" stroke="#4c8c84" stroke-width="2"/>
+  <text x="100" y="702" class="section" fill="#2a6861">DoLP：线偏振度</text>
+  <text x="105" y="756" class="formula">DoLP = √(S1² + S2²) / S0</text>
+  <text x="105" y="803" class="body">理想范围 0～1（或 0%～100%）</text>
+  <text x="105" y="840" class="small">0：四个方向几乎一样；1：能量几乎全部属于线偏振分量。</text>
+  <rect x="125" y="855" width="570" height="10" rx="5" fill="#d8dcde"/>
+  <rect x="125" y="855" width="400" height="10" rx="5" fill="#2a7774"/>
+
+  <rect x="810" y="656" width="720" height="224" rx="6" fill="#fff5e6" stroke="#d59b34" stroke-width="2"/>
+  <text x="840" y="702" class="section" fill="#875b12">AoLP：线偏振角</text>
+  <text x="845" y="756" class="formula">AoLP = ψ = ½ atan2(S2, S1)</text>
+  <text x="845" y="803" class="body">常映射到 [0°, 180°)，表示主线偏振轴的方向</text>
+  <text x="845" y="840" class="small">它是“轴”而非带箭头的方向，所以 10° 与 190° 等价。</text>
+
+  <!-- Footnotes -->
+  <rect x="70" y="920" width="1460" height="85" rx="6" fill="#ffffff" stroke="#cdd2d4" stroke-width="2"/>
+  <text x="98" y="953" class="body" font-weight="700">重要边界：</text>
+  <text x="220" y="953" class="body">DoLP 很低或 S0 很暗时，AoLP 没有稳定物理意义，应屏蔽；噪声还可能使原始 DoLP &gt; 1。</text>
+  <text x="98" y="983" class="body" font-weight="700">DoP ≠ DoLP：</text>
+  <text x="238" y="983" class="body">完整偏振度 DoP 还包含圆偏振 S3；仅有这四个线偏振通道无法测 S3，只能得到 DoLP。</text>
+</svg>
