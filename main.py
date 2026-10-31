@@ -270,6 +270,48 @@ class DoLPAnalysisDialog(QDialog):
                 QMessageBox.critical(self, "导出失败", f"导出数据失败: {e}")
 
 
+class LiveDoLPDialog(QDialog):
+    """显示实时 DoLP 伪彩图，支持滚轮缩放和鼠标拖动。"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("实时线偏振度 DoLP")
+        self.resize(900, 700)
+        self.setStyleSheet("QDialog { background-color: #1E1E1E; } QLabel { color: white; }")
+
+        layout = QVBoxLayout(self)
+        title = QLabel("实时线偏振度 DoLP (Jet)")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 14px; font-weight: bold; color: #00ADB5;")
+        layout.addWidget(title)
+
+        self.view = LiveImageGraphicsView(0, self)
+        self.view.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.view.show_placeholder("等待 DoLP 图像")
+        self.view.zoomTriggered.connect(self.on_zoom)
+        layout.addWidget(self.view, stretch=1)
+
+        self.lbl_stats = QLabel("DoLP 范围: 0–100%")
+        self.lbl_stats.setAlignment(Qt.AlignCenter)
+        self.lbl_stats.setStyleSheet("color: #AAAAAA; font-size: 12px;")
+        layout.addWidget(self.lbl_stats)
+
+    @Slot(float)
+    def on_zoom(self, factor):
+        current = self.view.zoom_factor
+        target = min(self.view.zoom_max, max(self.view.zoom_min, current * factor))
+        self.view.scale(target / current, target / current)
+        self.view.zoom_factor = target
+
+    def update_dolp(self, dolp):
+        dolp_8u = np.clip(dolp * 255.0, 0, 255).astype(np.uint8)
+        color_bgr = cv2.applyColorMap(dolp_8u, cv2.COLORMAP_JET)
+        self.view.update_color_image(cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB))
+        self.lbl_stats.setText(
+            f"平均 DoLP: {np.mean(dolp) * 100:.1f}%   "
+            f"范围: {np.min(dolp) * 100:.1f}%–{np.max(dolp) * 100:.1f}%"
+        )
+
+
 class LiveImageGraphicsView(QGraphicsView):
     """支持 4 视口全自动联动缩放、鼠标拖拽平移的高阶实时画面查看器"""
     clicked = Signal(int)             # 左键单击信号，发送自身索引
@@ -312,24 +354,35 @@ class LiveImageGraphicsView(QGraphicsView):
         img_c = np.ascontiguousarray(img_display)
         h, w = img_c.shape
         q_img = QImage(img_c.data, w, h, w, QImage.Format_Grayscale8).copy()
-        pixmap = QPixmap.fromImage(q_img)
+        self._set_pixmap(QPixmap.fromImage(q_img), w, h)
 
+    def update_color_image(self, img_rgb):
+        """更新 RGB 彩色图像纹理。"""
+        img_c = np.ascontiguousarray(img_rgb)
+        h, w, channels = img_c.shape
+        if channels != 3:
+            raise ValueError("彩色预览图像必须为 RGB 三通道")
+        q_img = QImage(img_c.data, w, h, w * channels, QImage.Format_RGB888).copy()
+        self._set_pixmap(QPixmap.fromImage(q_img), w, h)
+
+    def _set_pixmap(self, pixmap, width, height):
+        """设置视图纹理，并在分辨率改变时重新适配画面。"""
         # 检查尺寸是否发生变化
         size_changed = False
         if self.pixmap_item is not None:
             old_rect = self.scene.sceneRect()
-            if old_rect.width() != w or old_rect.height() != h:
+            if old_rect.width() != width or old_rect.height() != height:
                 size_changed = True
 
         if self.pixmap_item is None:
             self.scene.clear()
             self.pixmap_item = self.scene.addPixmap(pixmap)
-            self.scene.setSceneRect(0, 0, w, h)
+            self.scene.setSceneRect(0, 0, width, height)
             self.reset_zoom()
         else:
             self.pixmap_item.setPixmap(pixmap)
             if size_changed:
-                self.scene.setSceneRect(0, 0, w, h)
+                self.scene.setSceneRect(0, 0, width, height)
                 self.reset_zoom()
 
     def show_placeholder(self, text="无信号"):
@@ -1438,6 +1491,9 @@ class MainWindow(QMainWindow):
         self.last_synthesized_image = None
         self.last_synth_exposure_update = 0.0
         self.synth_contrast_max = 255
+        self.last_live_dolp = None
+        self.last_live_dolp_update = 0.0
+        self.live_dolp_dialog = None
         self.last_polarization_update = 0.0
         self.zoom_dialogs = []  # 缓存所有打开的大图查看器实例，避免被 Python GC 释放
 
@@ -1862,6 +1918,14 @@ class MainWindow(QMainWindow):
         self.combo_disp_mode.currentIndexChanged.connect(self.on_disp_mode_changed)
         layout_disp_mode.addWidget(self.combo_disp_mode)
         ctrl_layout.addLayout(layout_disp_mode)
+
+        self.btn_live_dolp = QPushButton("打开实时 DoLP 图")
+        self.btn_live_dolp.setFixedHeight(36)
+        self.btn_live_dolp.setToolTip("在独立窗口查看实时线偏振度伪彩图，可用滚轮缩放、鼠标拖动")
+        self.btn_live_dolp.clicked.connect(self.open_live_dolp_window)
+        self.btn_live_dolp.setEnabled(False)
+        self.btn_live_dolp.setVisible(initial_disp_mode == "synth-pol")
+        ctrl_layout.addWidget(self.btn_live_dolp)
 
         self.frame_synth_angle = QFrame()
         self.frame_synth_angle.setStyleSheet("background: transparent; border: none;")
@@ -2516,6 +2580,9 @@ class MainWindow(QMainWindow):
     def update_display_titles_and_views(self):
         is_3pol = (hasattr(self, 'combo_disp_mode') and self.combo_disp_mode.currentIndex() == 1)
         is_synth = (hasattr(self, 'combo_disp_mode') and self.combo_disp_mode.currentIndex() == 2)
+        if hasattr(self, 'btn_live_dolp'):
+            self.btn_live_dolp.setVisible(is_synth)
+            self.btn_live_dolp.setEnabled(is_synth and self.last_images[0] is not None)
         if hasattr(self, 'synth_frame'):
             self.synth_frame.setVisible(is_synth)
             for frame in self.img_frames:
@@ -2566,6 +2633,45 @@ class MainWindow(QMainWindow):
             self.update_synth_exposure_status(image)
             self.last_synth_exposure_update = now
         self.synth_view.update_image(self.apply_synth_contrast(image))
+
+    def calculate_live_dolp(self, img_90, img_45, img_135, img_0):
+        i90, i45, i135, i0 = (
+            np.asarray(image, dtype=np.float32)
+            for image in (img_90, img_45, img_135, img_0)
+        )
+        s0 = 0.5 * (i0 + i45 + i90 + i135)
+        s1 = i0 - i90
+        s2 = i45 - i135
+        dolp = np.zeros_like(s0, dtype=np.float32)
+        np.divide(np.hypot(s1, s2), s0, out=dolp, where=s0 > 1e-6)
+        np.clip(dolp, 0.0, 1.0, out=dolp)
+        return dolp
+
+    def update_live_dolp_window(self, images, force=False):
+        if self.live_dolp_dialog is None or not self.live_dolp_dialog.isVisible():
+            return
+        now = time.monotonic()
+        if not force and now - self.last_live_dolp_update < 0.2:
+            return
+        self.last_live_dolp = self.calculate_live_dolp(*images)
+        self.live_dolp_dialog.update_dolp(self.last_live_dolp)
+        self.last_live_dolp_update = now
+
+    @Slot()
+    def open_live_dolp_window(self):
+        if self.last_images[0] is None:
+            return
+        if self.live_dolp_dialog is None:
+            self.live_dolp_dialog = LiveDoLPDialog(self)
+            self.live_dolp_dialog.finished.connect(self.on_live_dolp_window_closed)
+        self.live_dolp_dialog.update_dolp(self.calculate_live_dolp(*self.last_images))
+        self.live_dolp_dialog.show()
+        self.live_dolp_dialog.raise_()
+        self.live_dolp_dialog.activateWindow()
+
+    @Slot(int)
+    def on_live_dolp_window_closed(self, result):
+        self.live_dolp_dialog = None
 
     def update_synth_exposure_status(self, image):
         sensor_max = 1023 if image.dtype == np.uint16 else 255
@@ -2626,6 +2732,9 @@ class MainWindow(QMainWindow):
         # 缓存图像，供暂停后保存使用
         self.last_images = [img_90, img_45, img_135, img_0]
         self.btn_save.setEnabled(True)
+        if self.combo_disp_mode.currentIndex() == 2:
+            self.btn_live_dolp.setEnabled(True)
+        self.update_live_dolp_window(self.last_images)
 
         # 更新 FPS 显示
         if fps > 0:
