@@ -304,6 +304,8 @@ class LiveImageGraphicsView(QGraphicsView):
 
         self.press_pos = None
         self.zoom_factor = 1.0
+        self.zoom_min = 0.1
+        self.zoom_max = 20.0
 
     def update_image(self, img_display):
         """实时更新图像纹理（深拷贝 C 内存以解决 Python GC 悬挂指针崩溃）"""
@@ -350,9 +352,14 @@ class LiveImageGraphicsView(QGraphicsView):
             painter.drawText(self.viewport().rect(), Qt.AlignCenter, text)
 
     def wheelEvent(self, event):
-        # 滚轮时触敏放大/缩小，并发射四图联动缩放信号
-        factor = 1.15 if event.angleDelta().y() > 0 else 0.85
+        # 滚轮以鼠标指向的位置为缩放锚点。
+        delta = event.angleDelta().y()
+        if not delta:
+            event.ignore()
+            return
+        factor = 1.15 ** (delta / 120.0)
         self.zoomTriggered.emit(factor)
+        event.accept()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -1710,6 +1717,7 @@ class MainWindow(QMainWindow):
         self.synth_view = LiveImageGraphicsView(0)
         self.synth_view.setStyleSheet("border: none; background-color: transparent;")
         self.synth_view.show_placeholder("等待相机图像")
+        self.synth_view.zoomTriggered.connect(self.on_main_views_zoom)
         synth_layout.addWidget(self.synth_view, stretch=1)
         self.grid_layout.addWidget(self.synth_frame, 0, 0, 2, 2)
         self.synth_frame.hide()
@@ -1870,6 +1878,44 @@ class MainWindow(QMainWindow):
         self.lbl_synth_angle.setText(f"{self.slider_synth_angle.value() / 10:g}°")
         ctrl_layout.addWidget(self.frame_synth_angle)
         self.frame_synth_angle.setVisible(initial_disp_mode == "synth-pol")
+
+        self.frame_synth_contrast = QFrame()
+        self.frame_synth_contrast.setStyleSheet("background: transparent; border: none;")
+        contrast_layout = QVBoxLayout(self.frame_synth_contrast)
+        contrast_layout.setContentsMargins(0, 0, 0, 0)
+        contrast_layout.setSpacing(4)
+        contrast_header = QHBoxLayout()
+        contrast_header.addWidget(QLabel("合成图对比度:"))
+        contrast_header.addStretch(1)
+        self.btn_reset_synth_contrast = QPushButton("恢复默认")
+        self.btn_reset_synth_contrast.setFixedHeight(26)
+        self.btn_reset_synth_contrast.clicked.connect(self.reset_synth_contrast)
+        contrast_header.addWidget(self.btn_reset_synth_contrast)
+        contrast_layout.addLayout(contrast_header)
+
+        self.lbl_synth_black = QLabel("黑电平: 0")
+        contrast_layout.addWidget(self.lbl_synth_black)
+        self.slider_synth_black = QSlider(Qt.Horizontal)
+        self.slider_synth_black.setRange(0, 254)
+        self.slider_synth_black.setValue(int(self.config.get("SynthContrastBlack", 0)))
+        self.slider_synth_black.valueChanged.connect(self.on_synth_contrast_changed)
+        contrast_layout.addWidget(self.slider_synth_black)
+
+        self.lbl_synth_white = QLabel("白电平: 255")
+        contrast_layout.addWidget(self.lbl_synth_white)
+        self.slider_synth_white = QSlider(Qt.Horizontal)
+        self.slider_synth_white.setRange(1, 255)
+        white_level = max(
+            self.slider_synth_black.value() + 1,
+            int(self.config.get("SynthContrastWhite", 255))
+        )
+        self.slider_synth_white.setValue(min(255, white_level))
+        self.slider_synth_white.valueChanged.connect(self.on_synth_contrast_changed)
+        contrast_layout.addWidget(self.slider_synth_white)
+        self.lbl_synth_black.setText(f"黑电平: {self.slider_synth_black.value()}")
+        self.lbl_synth_white.setText(f"白电平: {self.slider_synth_white.value()}")
+        ctrl_layout.addWidget(self.frame_synth_contrast)
+        self.frame_synth_contrast.setVisible(initial_disp_mode == "synth-pol")
 
         # 整体旋转角 x 设置组（3方向解复用模式下显示，与 02_calibrate_rotation 校准角联动）
         self.frame_rotation_angle = QFrame()
@@ -2377,6 +2423,7 @@ class MainWindow(QMainWindow):
         self.frame_rotation_angle.setVisible(is_3pol)
         is_synth = (idx == 2)
         self.frame_synth_angle.setVisible(is_synth)
+        self.frame_synth_contrast.setVisible(is_synth)
         self.synth_frame.setVisible(is_synth)
         for frame in self.img_frames:
             frame.setVisible(not is_synth)
@@ -2391,6 +2438,41 @@ class MainWindow(QMainWindow):
         self.lbl_synth_title.setText(f"合成偏振图像 · {angle:g}°")
         if self.last_images[0] is not None:
             self.update_synthesized_view(*self.last_images)
+
+    @Slot(int)
+    def on_synth_contrast_changed(self, value):
+        black = self.slider_synth_black.value()
+        white = self.slider_synth_white.value()
+        if black >= white:
+            if self.sender() is self.slider_synth_black:
+                white = min(255, black + 1)
+                self.slider_synth_white.setValue(white)
+            else:
+                black = max(0, white - 1)
+                self.slider_synth_black.setValue(black)
+
+        self.config["SynthContrastBlack"] = black
+        self.config["SynthContrastWhite"] = white
+        self.lbl_synth_black.setText(f"黑电平: {black}")
+        self.lbl_synth_white.setText(f"白电平: {white}")
+        if self.last_images[0] is not None and self.combo_disp_mode.currentIndex() == 2:
+            self.update_synthesized_view(*self.last_images)
+
+    @Slot()
+    def reset_synth_contrast(self):
+        self.slider_synth_black.setValue(0)
+        self.slider_synth_white.setValue(255)
+        self.on_synth_contrast_changed(0)
+
+    def apply_synth_contrast(self, image):
+        black = self.slider_synth_black.value()
+        white = self.slider_synth_white.value()
+        lut = np.clip(
+            (np.arange(256, dtype=np.float32) - black) * (255.0 / (white - black)),
+            0,
+            255
+        ).astype(np.uint8)
+        return cv2.LUT(np.ascontiguousarray(image), lut)
 
     @Slot(float)
     def on_rotation_angle_changed(self, val):
@@ -2410,6 +2492,7 @@ class MainWindow(QMainWindow):
                 frame.setVisible(not is_synth)
         if hasattr(self, 'frame_synth_angle'):
             self.frame_synth_angle.setVisible(is_synth)
+            self.frame_synth_contrast.setVisible(is_synth)
         if is_3pol:
             x_deg = self.spin_rotation_angle.value()
             titles = [
@@ -2451,7 +2534,7 @@ class MainWindow(QMainWindow):
             image_display = (image >> 2).astype(np.uint8)
         else:
             image_display = image
-        self.synth_view.update_image(image_display)
+        self.synth_view.update_image(self.apply_synth_contrast(image_display))
 
     def refresh_offline_display(self):
         if self.last_images[0] is None:
@@ -2536,10 +2619,21 @@ class MainWindow(QMainWindow):
             self.img_views[i].update_image(img_display)
 
     def on_main_views_zoom(self, factor):
-        for view in self.img_views:
-            view.scale(factor, factor)
-            view.zoom_factor *= factor
-        self.sync_main_views_scroll(self.sender())
+        if self.combo_disp_mode.currentIndex() == 2:
+            views = [self.synth_view]
+        else:
+            views = self.img_views
+
+        source = self.sender()
+        current_zoom = source.zoom_factor if source in views else views[0].zoom_factor
+        target_zoom = min(views[0].zoom_max, max(views[0].zoom_min, current_zoom * factor))
+        applied_factor = target_zoom / current_zoom
+        for view in views:
+            view.scale(applied_factor, applied_factor)
+            view.zoom_factor = target_zoom
+
+        if len(views) > 1:
+            self.sync_main_views_scroll(source)
 
     def on_main_views_pan(self):
         self.sync_main_views_scroll(self.sender())
@@ -2731,6 +2825,8 @@ class MainWindow(QMainWindow):
             self.combo_disp_mode.blockSignals(block)
             self.spin_rotation_angle.blockSignals(block)
             self.slider_synth_angle.blockSignals(block)
+            self.slider_synth_black.blockSignals(block)
+            self.slider_synth_white.blockSignals(block)
 
     @Slot(str)
     def on_camera_error(self, message):
