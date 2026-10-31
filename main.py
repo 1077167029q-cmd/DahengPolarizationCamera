@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QGridLayout,
                                QFileDialog, QMessageBox, QFrame, QSizePolicy,
                                QDoubleSpinBox, QComboBox, QSpinBox, QScrollArea,
                                QDialog, QGraphicsView, QGraphicsScene, QProgressDialog, QInputDialog,
-                               QCheckBox)
+                               QCheckBox, QSlider)
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor
 
 # 引入 DPC 重建与偏振解复用模块及线程
@@ -1013,6 +1013,30 @@ def calc_s0_image(img_90, img_45, img_135, img_0):
     return s0
 
 
+def synthesize_polarization_image(img_90, img_45, img_135, img_0, angle_deg):
+    """由四个原始分析器方向强度合成指定检偏角的强度图。"""
+    if any(img is None for img in (img_90, img_45, img_135, img_0)):
+        return None
+    if any(img.shape != img_90.shape for img in (img_45, img_135, img_0)):
+        raise ValueError("四个偏振通道的图像尺寸必须一致")
+
+    i90, i45, i135, i0 = (np.asarray(img, dtype=np.float32)
+                          for img in (img_90, img_45, img_135, img_0))
+    # 由相机的通道映射得到 S0、S1、S2，再按任意线偏振检偏角合成。
+    s0 = 0.5 * (i0 + i90 + i45 + i135)
+    s1 = i0 - i90
+    s2 = i45 - i135
+    theta = np.deg2rad(float(angle_deg))
+    result = 0.5 * (s0 + s1 * np.cos(2.0 * theta) + s2 * np.sin(2.0 * theta))
+
+    dtype = img_90.dtype
+    if np.issubdtype(dtype, np.integer):
+        limits = np.iinfo(dtype)
+        max_value = 1023 if dtype == np.uint16 else limits.max
+        result = np.clip(np.rint(result), 0, max_value)
+    return result.astype(dtype, copy=False)
+
+
 class CameraCaptureThread(QThread):
     """
     后台相机采集与解复用线程 (对应 C# 的 CaptureLoop)
@@ -1404,6 +1428,7 @@ class MainWindow(QMainWindow):
 
         # 缓存最后捕获的四张图像用于保存
         self.last_images = [None, None, None, None]  # 90, 45, 135, 0
+        self.last_synthesized_image = None
         self.last_polarization_update = 0.0
         self.zoom_dialogs = []  # 缓存所有打开的大图查看器实例，避免被 Python GC 释放
 
@@ -1674,6 +1699,21 @@ class MainWindow(QMainWindow):
             self.img_views.append(lbl_img)
             self.img_frames.append(frame)
 
+        self.synth_frame = QFrame()
+        self.synth_frame.setStyleSheet("background-color: #121212; border: 1px solid #3A3A3A; border-radius: 4px;")
+        synth_layout = QVBoxLayout(self.synth_frame)
+        synth_layout.setContentsMargins(5, 5, 5, 5)
+        self.lbl_synth_title = QLabel("合成偏振图像 · 0°")
+        self.lbl_synth_title.setStyleSheet("font-weight: bold; color: #00ADB5; font-size: 12px;")
+        self.lbl_synth_title.setAlignment(Qt.AlignCenter)
+        synth_layout.addWidget(self.lbl_synth_title)
+        self.synth_view = LiveImageGraphicsView(0)
+        self.synth_view.setStyleSheet("border: none; background-color: transparent;")
+        self.synth_view.show_placeholder("等待相机图像")
+        synth_layout.addWidget(self.synth_view, stretch=1)
+        self.grid_layout.addWidget(self.synth_frame, 0, 0, 2, 2)
+        self.synth_frame.hide()
+
         image_layout = QVBoxLayout()
         image_layout.setSpacing(8)
         image_layout.addLayout(self.grid_layout, stretch=1)
@@ -1748,7 +1788,7 @@ class MainWindow(QMainWindow):
             QPushButton { background-color: #FF9800; color: white; }
             QPushButton:disabled { background-color: #555555; color: #888888; }
         """)
-        self.btn_save.setEnabled(False)  # 初始禁用
+        self.btn_save.setEnabled(False)  # 首帧到达后可保存实时图像
         self.btn_save.clicked.connect(self.save_images)
         ctrl_layout.addWidget(self.btn_save)
 
@@ -1789,16 +1829,47 @@ class MainWindow(QMainWindow):
         layout_disp_mode = QHBoxLayout()
         layout_disp_mode.addWidget(QLabel("显示模式:"))
         self.combo_disp_mode = QComboBox()
-        self.combo_disp_mode.addItems(["4 方向偏振 (原生 90°, 45°, 135°, 0°)", "3 方向偏振解复用 (旋转角 x)"])
+        self.combo_disp_mode.addItems([
+            "4 方向偏振 (原生 90°, 45°, 135°, 0°)",
+            "3 方向偏振解复用 (旋转角 x)",
+            "任意角度合成 (0°–180°)"
+        ])
         self.combo_disp_mode.setStyleSheet("background-color: #3D3D3D; color: white; border: 1px solid #555555; padding: 3px;")
         initial_disp_mode = self.config.get("DisplayMode", "4-pol")
         if initial_disp_mode == "3-pol":
             self.combo_disp_mode.setCurrentIndex(1)
+        elif initial_disp_mode == "synth-pol":
+            self.combo_disp_mode.setCurrentIndex(2)
         else:
             self.combo_disp_mode.setCurrentIndex(0)
         self.combo_disp_mode.currentIndexChanged.connect(self.on_disp_mode_changed)
         layout_disp_mode.addWidget(self.combo_disp_mode)
         ctrl_layout.addLayout(layout_disp_mode)
+
+        self.frame_synth_angle = QFrame()
+        self.frame_synth_angle.setStyleSheet("background: transparent; border: none;")
+        synth_angle_layout = QVBoxLayout(self.frame_synth_angle)
+        synth_angle_layout.setContentsMargins(0, 0, 0, 0)
+        synth_angle_layout.setSpacing(4)
+        synth_angle_header = QHBoxLayout()
+        synth_angle_header.addWidget(QLabel("合成偏振角:"))
+        self.lbl_synth_angle = QLabel("0°")
+        self.lbl_synth_angle.setMinimumWidth(48)
+        self.lbl_synth_angle.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lbl_synth_angle.setStyleSheet("color: #4DD0C8; font-weight: bold;")
+        synth_angle_header.addWidget(self.lbl_synth_angle)
+        synth_angle_layout.addLayout(synth_angle_header)
+        self.slider_synth_angle = QSlider(Qt.Horizontal)
+        self.slider_synth_angle.setRange(0, 1800)
+        self.slider_synth_angle.setSingleStep(1)
+        self.slider_synth_angle.setPageStep(5)
+        self.slider_synth_angle.setValue(round(float(self.config.get("SynthesizedAngle", 0)) * 10))
+        self.slider_synth_angle.setToolTip("选择要合成的线偏振检偏角（0° 到 180°）")
+        self.slider_synth_angle.valueChanged.connect(self.on_synth_angle_changed)
+        synth_angle_layout.addWidget(self.slider_synth_angle)
+        self.lbl_synth_angle.setText(f"{self.slider_synth_angle.value() / 10:g}°")
+        ctrl_layout.addWidget(self.frame_synth_angle)
+        self.frame_synth_angle.setVisible(initial_disp_mode == "synth-pol")
 
         # 整体旋转角 x 设置组（3方向解复用模式下显示，与 02_calibrate_rotation 校准角联动）
         self.frame_rotation_angle = QFrame()
@@ -2265,7 +2336,7 @@ class MainWindow(QMainWindow):
             # 开启采集
             self.btn_toggle.setText("暂停采集")
             self.btn_toggle.setStyleSheet("background-color: #DC3545; color: white;")  # 红色
-            self.btn_save.setEnabled(False)  # 开启采集时禁用保存按钮
+            self.btn_save.setEnabled(self.last_images[0] is not None)
             self.btn_dolp.setEnabled(False)  # 开启采集时禁用 DoLP 分析按钮
             self.btn_zoom_view.setEnabled(False)  # 开启采集时禁用细节浏览器按钮
             self.btn_dpc_save_tif.setEnabled(False)  # 开启采集时禁用 DPC 保存
@@ -2304,8 +2375,22 @@ class MainWindow(QMainWindow):
     def on_disp_mode_changed(self, idx):
         is_3pol = (idx == 1)
         self.frame_rotation_angle.setVisible(is_3pol)
-        self.config["DisplayMode"] = "3-pol" if is_3pol else "4-pol"
+        is_synth = (idx == 2)
+        self.frame_synth_angle.setVisible(is_synth)
+        self.synth_frame.setVisible(is_synth)
+        for frame in self.img_frames:
+            frame.setVisible(not is_synth)
+        self.config["DisplayMode"] = "synth-pol" if is_synth else ("3-pol" if is_3pol else "4-pol")
         self.update_display_titles_and_views()
+
+    @Slot(int)
+    def on_synth_angle_changed(self, slider_value):
+        angle = slider_value / 10.0
+        self.config["SynthesizedAngle"] = angle
+        self.lbl_synth_angle.setText(f"{angle:g}°")
+        self.lbl_synth_title.setText(f"合成偏振图像 · {angle:g}°")
+        if self.last_images[0] is not None:
+            self.update_synthesized_view(*self.last_images)
 
     @Slot(float)
     def on_rotation_angle_changed(self, val):
@@ -2318,6 +2403,13 @@ class MainWindow(QMainWindow):
 
     def update_display_titles_and_views(self):
         is_3pol = (hasattr(self, 'combo_disp_mode') and self.combo_disp_mode.currentIndex() == 1)
+        is_synth = (hasattr(self, 'combo_disp_mode') and self.combo_disp_mode.currentIndex() == 2)
+        if hasattr(self, 'synth_frame'):
+            self.synth_frame.setVisible(is_synth)
+            for frame in self.img_frames:
+                frame.setVisible(not is_synth)
+        if hasattr(self, 'frame_synth_angle'):
+            self.frame_synth_angle.setVisible(is_synth)
         if is_3pol:
             x_deg = self.spin_rotation_angle.value()
             titles = [
@@ -2326,6 +2418,9 @@ class MainWindow(QMainWindow):
                 f"偏振通道 s3 (240° + {x_deg:.1f}°)",
                 "偏振总强度 S0"
             ]
+        elif is_synth:
+            titles = ["偏振角度 90°", "偏振角度 45°", "偏振角度 135°", "偏振角度 0°"]
+            self.lbl_synth_title.setText(f"合成偏振图像 · {self.slider_synth_angle.value() / 10:g}°")
         else:
             titles = ["偏振角度 90°", "偏振角度 45°", "偏振角度 135°", "偏振角度 0°"]
 
@@ -2343,6 +2438,20 @@ class MainWindow(QMainWindow):
 
         if not getattr(self.capture_thread, 'is_capturing', False) and self.last_images[0] is not None:
             self.refresh_offline_display()
+
+        if is_synth and self.last_images[0] is not None:
+            self.update_synthesized_view(*self.last_images)
+
+    def update_synthesized_view(self, img_90, img_45, img_135, img_0):
+        self.last_synthesized_image = synthesize_polarization_image(
+            img_90, img_45, img_135, img_0, self.slider_synth_angle.value() / 10.0
+        )
+        image = self.last_synthesized_image
+        if image.dtype == np.uint16:
+            image_display = (image >> 2).astype(np.uint8)
+        else:
+            image_display = image
+        self.synth_view.update_image(image_display)
 
     def refresh_offline_display(self):
         if self.last_images[0] is None:
@@ -2381,6 +2490,7 @@ class MainWindow(QMainWindow):
         """
         # 缓存图像，供暂停后保存使用
         self.last_images = [img_90, img_45, img_135, img_0]
+        self.btn_save.setEnabled(True)
 
         # 更新 FPS 显示
         if fps > 0:
@@ -2398,6 +2508,10 @@ class MainWindow(QMainWindow):
             self.lbl_dolp.setText(f"{dolp:.1f} %" if np.isfinite(dolp) else "-- %")
             self.lbl_aolp.setText(f"{aolp:.1f} °" if np.isfinite(aolp) else "-- °")
             self.last_polarization_update = now
+
+        if self.combo_disp_mode.currentIndex() == 2:
+            self.update_synthesized_view(img_90, img_45, img_135, img_0)
+            return
 
         # 根据当前选择的显示模式 (4方向原生 vs 3方向解复用) 渲染 4 张画面
         is_3pol = (hasattr(self, 'combo_disp_mode') and self.combo_disp_mode.currentIndex() == 1)
@@ -2524,6 +2638,31 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "保存提示", "当前没有有效的图像可保存！")
             return
 
+        if self.combo_disp_mode.currentIndex() == 2:
+            angle = self.slider_synth_angle.value() / 10.0
+            default_name = f"polarization_{time.strftime('%Y%m%d_%H%M%S')}_{angle:g}deg.tiff"
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "保存当前合成偏振图像",
+                os.path.join(self.config.get("LastSaveDir", os.getcwd()), default_name),
+                "TIFF Image (*.tif *.tiff);;PNG Image (*.png)"
+            )
+            if not file_path:
+                return
+
+            image = synthesize_polarization_image(*self.last_images, angle)
+            try:
+                if not cv2.imwrite(file_path, image):
+                    raise OSError("图像编码器未能写入文件")
+                self.config["LastSaveDir"] = os.path.dirname(file_path)
+                QMessageBox.information(
+                    self, "保存成功",
+                    f"{angle:g}° 合成偏振图像已保存至:\n{file_path}"
+                )
+            except Exception as e:
+                QMessageBox.critical(self, "保存失败", f"保存图像时发生错误:\n{e}")
+            return
+
         last_dir = self.config.get("LastSaveDir", os.getcwd())
         folder_path = QFileDialog.getExistingDirectory(self, "选择保存偏振图像的文件夹", last_dir)
         if not folder_path:
@@ -2591,6 +2730,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'combo_disp_mode'):
             self.combo_disp_mode.blockSignals(block)
             self.spin_rotation_angle.blockSignals(block)
+            self.slider_synth_angle.blockSignals(block)
 
     @Slot(str)
     def on_camera_error(self, message):
@@ -2658,6 +2798,31 @@ class MainWindow(QMainWindow):
         """将当前显示的 4 幅偏振角度图像保存为 TIFF 文件"""
         if self.last_images[0] is None:
             QMessageBox.warning(self, "保存提示", "当前没有有效的图像可保存！")
+            return
+
+        if self.combo_disp_mode.currentIndex() == 2:
+            angle = self.slider_synth_angle.value() / 10.0
+            default_name = f"polarization_{time.strftime('%Y%m%d_%H%M%S')}_{angle:g}deg.tiff"
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "保存当前合成偏振图像",
+                os.path.join(self.config.get("LastSaveDir", os.getcwd()), default_name),
+                "TIFF Image (*.tif *.tiff);;PNG Image (*.png)"
+            )
+            if not file_path:
+                return
+
+            image = synthesize_polarization_image(*self.last_images, angle)
+            try:
+                if not cv2.imwrite(file_path, image):
+                    raise OSError("图像编码器未能写入文件")
+                self.config["LastSaveDir"] = os.path.dirname(file_path)
+                QMessageBox.information(
+                    self, "保存成功",
+                    f"{angle:g}° 合成偏振图像已保存至:\n{file_path}"
+                )
+            except Exception as e:
+                QMessageBox.critical(self, "保存失败", f"保存图像时发生错误:\n{e}")
             return
 
         last_dir = self.config.get("LastSaveDir", os.getcwd())
@@ -2730,9 +2895,8 @@ class MainWindow(QMainWindow):
         self.combo_line_inverter.blockSignals(block)
         if hasattr(self, 'combo_disp_mode'):
             self.combo_disp_mode.blockSignals(block)
-            self.spin_custom_angle1.blockSignals(block)
-            self.spin_custom_angle2.blockSignals(block)
-            self.spin_custom_angle3.blockSignals(block)
+            self.spin_rotation_angle.blockSignals(block)
+            self.slider_synth_angle.blockSignals(block)
 
     @Slot(str)
     def on_trigger_mode_changed(self, text):
