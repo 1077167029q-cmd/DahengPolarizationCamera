@@ -1436,6 +1436,8 @@ class MainWindow(QMainWindow):
         # 缓存最后捕获的四张图像用于保存
         self.last_images = [None, None, None, None]  # 90, 45, 135, 0
         self.last_synthesized_image = None
+        self.last_synth_exposure_update = 0.0
+        self.synth_contrast_max = 255
         self.last_polarization_update = 0.0
         self.zoom_dialogs = []  # 缓存所有打开的大图查看器实例，避免被 Python GC 释放
 
@@ -1714,6 +1716,13 @@ class MainWindow(QMainWindow):
         self.lbl_synth_title.setStyleSheet("font-weight: bold; color: #00ADB5; font-size: 12px;")
         self.lbl_synth_title.setAlignment(Qt.AlignCenter)
         synth_layout.addWidget(self.lbl_synth_title)
+        self.lbl_synth_exposure = QLabel("P95 亮度: -- | 饱和像素: -- | 曝光状态: --")
+        self.lbl_synth_exposure.setAlignment(Qt.AlignCenter)
+        self.lbl_synth_exposure.setStyleSheet("color: #AAAAAA; font-size: 12px; border: none;")
+        self.lbl_synth_exposure.setToolTip(
+            "基于当前合成图的原始强度计算；P95 达到满量程 95% 或饱和像素超过 0.1% 时提示可能过曝"
+        )
+        synth_layout.addWidget(self.lbl_synth_exposure)
         self.synth_view = LiveImageGraphicsView(0)
         self.synth_view.setStyleSheet("border: none; background-color: transparent;")
         self.synth_view.show_placeholder("等待相机图像")
@@ -1912,8 +1921,8 @@ class MainWindow(QMainWindow):
         self.slider_synth_white.setValue(min(255, white_level))
         self.slider_synth_white.valueChanged.connect(self.on_synth_contrast_changed)
         contrast_layout.addWidget(self.slider_synth_white)
-        self.lbl_synth_black.setText(f"黑电平: {self.slider_synth_black.value()}")
-        self.lbl_synth_white.setText(f"白电平: {self.slider_synth_white.value()}")
+        self.lbl_synth_black.setText(f"黑电平: {self.slider_synth_black.value()}/255")
+        self.lbl_synth_white.setText(f"白电平: {self.slider_synth_white.value()}/255")
         ctrl_layout.addWidget(self.frame_synth_contrast)
         self.frame_synth_contrast.setVisible(initial_disp_mode == "synth-pol")
 
@@ -2445,7 +2454,7 @@ class MainWindow(QMainWindow):
         white = self.slider_synth_white.value()
         if black >= white:
             if self.sender() is self.slider_synth_black:
-                white = min(255, black + 1)
+                white = min(self.synth_contrast_max, black + 1)
                 self.slider_synth_white.setValue(white)
             else:
                 black = max(0, white - 1)
@@ -2453,26 +2462,47 @@ class MainWindow(QMainWindow):
 
         self.config["SynthContrastBlack"] = black
         self.config["SynthContrastWhite"] = white
-        self.lbl_synth_black.setText(f"黑电平: {black}")
-        self.lbl_synth_white.setText(f"白电平: {white}")
+        self.lbl_synth_black.setText(f"黑电平: {black}/{self.synth_contrast_max}")
+        self.lbl_synth_white.setText(f"白电平: {white}/{self.synth_contrast_max}")
         if self.last_images[0] is not None and self.combo_disp_mode.currentIndex() == 2:
             self.update_synthesized_view(*self.last_images)
 
     @Slot()
     def reset_synth_contrast(self):
         self.slider_synth_black.setValue(0)
-        self.slider_synth_white.setValue(255)
+        self.slider_synth_white.setValue(self.synth_contrast_max)
         self.on_synth_contrast_changed(0)
 
     def apply_synth_contrast(self, image):
         black = self.slider_synth_black.value()
         white = self.slider_synth_white.value()
-        lut = np.clip(
-            (np.arange(256, dtype=np.float32) - black) * (255.0 / (white - black)),
-            0,
-            255
-        ).astype(np.uint8)
-        return cv2.LUT(np.ascontiguousarray(image), lut)
+        mapped = (np.asarray(image, dtype=np.float32) - black) * (255.0 / (white - black))
+        return np.clip(np.rint(mapped), 0, 255).astype(np.uint8)
+
+    def update_synth_contrast_range(self, image):
+        sensor_max = 1023 if image.dtype == np.uint16 else 255
+        if sensor_max == self.synth_contrast_max:
+            return
+
+        old_max = self.synth_contrast_max
+        black = round(self.slider_synth_black.value() * sensor_max / old_max)
+        white = round(self.slider_synth_white.value() * sensor_max / old_max)
+        black = min(sensor_max - 1, black)
+        white = min(sensor_max, max(black + 1, white))
+
+        self.slider_synth_black.blockSignals(True)
+        self.slider_synth_white.blockSignals(True)
+        self.slider_synth_black.setRange(0, sensor_max - 1)
+        self.slider_synth_white.setRange(1, sensor_max)
+        self.slider_synth_black.setValue(black)
+        self.slider_synth_white.setValue(white)
+        self.slider_synth_black.blockSignals(False)
+        self.slider_synth_white.blockSignals(False)
+        self.synth_contrast_max = sensor_max
+        self.config["SynthContrastBlack"] = black
+        self.config["SynthContrastWhite"] = white
+        self.lbl_synth_black.setText(f"黑电平: {black}/{sensor_max}")
+        self.lbl_synth_white.setText(f"白电平: {white}/{sensor_max}")
 
     @Slot(float)
     def on_rotation_angle_changed(self, val):
@@ -2530,11 +2560,33 @@ class MainWindow(QMainWindow):
             img_90, img_45, img_135, img_0, self.slider_synth_angle.value() / 10.0
         )
         image = self.last_synthesized_image
-        if image.dtype == np.uint16:
-            image_display = (image >> 2).astype(np.uint8)
-        else:
-            image_display = image
-        self.synth_view.update_image(self.apply_synth_contrast(image_display))
+        self.update_synth_contrast_range(image)
+        now = time.monotonic()
+        if now - self.last_synth_exposure_update >= 0.2:
+            self.update_synth_exposure_status(image)
+            self.last_synth_exposure_update = now
+        self.synth_view.update_image(self.apply_synth_contrast(image))
+
+    def update_synth_exposure_status(self, image):
+        sensor_max = 1023 if image.dtype == np.uint16 else 255
+        sample = np.asarray(image[::8, ::8], dtype=np.float32)
+        finite = sample[np.isfinite(sample)]
+        if finite.size == 0:
+            self.lbl_synth_exposure.setText("P95 亮度: -- | 饱和像素: -- | 曝光状态: 无有效数据")
+            return
+
+        p95 = float(np.percentile(finite, 95))
+        saturated_percent = float(np.count_nonzero(finite >= sensor_max * 0.995)) * 100.0 / finite.size
+        is_overexposed = p95 >= sensor_max * 0.95 or saturated_percent >= 0.1
+        status = "可能过曝" if is_overexposed else "正常"
+        color = "#F44336" if is_overexposed else "#4DD0C8"
+        self.lbl_synth_exposure.setText(
+            f"P95 亮度: {p95:.0f}/{sensor_max} ({p95 / sensor_max * 100:.1f}%)"
+            f" | 饱和像素: {saturated_percent:.2f}% | {status}"
+        )
+        self.lbl_synth_exposure.setStyleSheet(
+            f"color: {color}; font-size: 12px; font-weight: bold; border: none;"
+        )
 
     def refresh_offline_display(self):
         if self.last_images[0] is None:
